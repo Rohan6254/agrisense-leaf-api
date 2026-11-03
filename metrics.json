@@ -1,0 +1,63 @@
+{
+  "model": "efficientnet_b0",
+  "test_accuracy": 0.9555,
+  "test_macro_f1": 0.9419,
+  "per_class": {
+    "Blight": {
+      "precision": 0.9235,
+      "recall": 0.9128,
+      "f1-score": 0.9181,
+      "support": 172.0
+    },
+    "Common_Rust": {
+      "precision": 0.9949,
+      "recall": 0.9898,
+      "f1-score": 0.9923,
+      "support": 196.0
+    },
+    "Gray_Leaf_Spot": {
+      "precision": 0.8427,
+      "recall": 0.8721,
+      "f1-score": 0.8571,
+      "support": 86.0
+    },
+    "Healthy": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 175.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      157,
+      1,
+      14,
+      0
+    ],
+    [
+      2,
+      194,
+      0,
+      0
+    ],
+    [
+      11,
+      0,
+      75,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      175
+    ]
+  ],
+  "classes": [
+    "Blight",
+    "Common_Rust",
+    "Gray_Leaf_Spot",
+    "Healthy"
+  ]
+}
