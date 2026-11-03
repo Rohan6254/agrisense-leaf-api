@@ -1,5 +1,5 @@
 """
-AgriSense corn leaf disease prediction API (Hugging Face Space, Docker)
+AgriSense corn leaf disease prediction API (ONNX Runtime, for Render free tier)
 
   GET  /health        -> status
   GET  /model-info    -> classes and test metrics (accuracy, F1 per class)
@@ -11,22 +11,24 @@ import json
 from pathlib import Path
 
 import httpx
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
+import onnxruntime as ort
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image
 from pydantic import BaseModel
-from torchvision import transforms
-from torchvision.models import efficientnet_b0
 
 HERE = Path(__file__).parent
 CLASSES = json.loads((HERE / "classes.json").read_text())
 METRICS = json.loads((HERE / "metrics.json").read_text()) if (HERE / "metrics.json").exists() else {}
 CONFIDENCE_THRESHOLD = 0.60
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-# Friendly names for whatever the dataset folders are called
+session = ort.InferenceSession(str(HERE / "corn_leaf_model.onnx"), providers=["CPUExecutionProvider"])
+INPUT_NAME = session.get_inputs()[0].name
+
+
 def friendly(name: str) -> str:
     n = name.lower()
     if "rust" in n:
@@ -39,17 +41,26 @@ def friendly(name: str) -> str:
         return "Healthy"
     return name.replace("_", " ").title()
 
-model = efficientnet_b0(weights=None)
-model.classifier[1] = nn.Linear(model.classifier[1].in_features, len(CLASSES))
-model.load_state_dict(torch.load(HERE / "corn_leaf_model.pt", map_location="cpu"))
-model.eval()
 
-TF = transforms.Compose([
-    transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
+def preprocess(img: Image.Image) -> np.ndarray:
+    # Same steps as training: resize short side to 256, center crop 224, normalize
+    img = img.convert("RGB")
+    w, h = img.size
+    scale = 256 / min(w, h)
+    img = img.resize((max(256, round(w * scale)), max(256, round(h * scale))), Image.BILINEAR)
+    w, h = img.size
+    left, top = (w - 224) // 2, (h - 224) // 2
+    img = img.crop((left, top, left + 224, top + 224))
+    arr = (np.asarray(img, dtype=np.float32) / 255.0 - MEAN) / STD
+    return arr.transpose(2, 0, 1)[np.newaxis, :].astype(np.float32)
 
-app = FastAPI(title="AgriSense Corn Leaf Disease API", version="1.0.0")
+
+def softmax(x: np.ndarray) -> np.ndarray:
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+
+app = FastAPI(title="AgriSense Corn Leaf Disease API", version="1.1.0")
 
 
 class PredictRequest(BaseModel):
@@ -58,12 +69,12 @@ class PredictRequest(BaseModel):
 
 def run_model(image_bytes: bytes) -> dict:
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img = Image.open(io.BytesIO(image_bytes))
     except Exception:
         raise HTTPException(status_code=400, detail="The file is not a readable image.")
-    with torch.no_grad():
-        probs = F.softmax(model(TF(img).unsqueeze(0)), dim=1)[0]
-    order = probs.argsort(descending=True).tolist()
+    logits = session.run(None, {INPUT_NAME: preprocess(img)})[0][0]
+    probs = softmax(logits)
+    order = probs.argsort()[::-1]
     top = [{"label": friendly(CLASSES[i]), "confidence": round(float(probs[i]), 4)} for i in order[:3]]
     best = top[0]
     uncertain = best["confidence"] < CONFIDENCE_THRESHOLD
@@ -87,7 +98,7 @@ def health():
 @app.get("/model-info")
 def model_info():
     return {
-        "model": METRICS.get("model", "efficientnet_b0"),
+        "model": METRICS.get("model", "efficientnet_b0") + " (ONNX)",
         "classes": [friendly(c) for c in CLASSES],
         "test_accuracy": METRICS.get("test_accuracy"),
         "test_macro_f1": METRICS.get("test_macro_f1"),
@@ -114,6 +125,9 @@ async def predict(req: PredictRequest):
 @app.post("/predict-file")
 async def predict_file(file: UploadFile = File(...)):
     data = await file.read()
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image is larger than 10 MB.")
+    return run_model(data)
     if len(data) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Image is larger than 10 MB.")
     return run_model(data)
